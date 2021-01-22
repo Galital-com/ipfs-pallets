@@ -1,9 +1,9 @@
 [package]
-authors = ['Substrate DevHub <https://github.com/substrate-developer-hub>']
-description = 'FRAME pallet template for defining custom runtime logic.'
+authors = ['Starkley Tech <https://github.com/starkleytech> <https://starkleytech.com>']
+description = 'FRAME pallet for using ipfs inside substrate'
 edition = '2018'
 homepage = 'https://substrate.dev'
-license = 'Unlicense'
+license = 'Apache-2.0'
 name = 'pallet-ipfs'
 repository = 'https://github.com/starkleytech/ipfs-pallets'
 version = '2.0.0'
