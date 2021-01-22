@@ -1,103 +1,485 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
-/// Edit this file to define custom logic or remove it if it is not needed.
-/// Learn more about FRAME and the core library of Substrate FRAME pallets:
-/// https://substrate.dev/docs/en/knowledgebase/runtime/frame
 
-use frame_support::{decl_module, decl_storage, decl_event, decl_error, dispatch, traits::Get};
-use frame_system::ensure_signed;
 
-#[cfg(test)]
-mod mock;
+use codec::{Encode, Decode};
+use frame_support::{debug, decl_module, decl_storage, decl_event, decl_error, weights::Weight};
+use frame_system::{self as system, ensure_signed};
+use sp_core::offchain::{Duration, IpfsRequest, IpfsResponse, OpaqueMultiaddr, Timestamp};
+use sp_io::offchain::timestamp;
+use sp_runtime::offchain::{ipfs as ipfs_offchain, http};
+use sp_std::{str, vec::Vec};
 
-#[cfg(test)]
-mod tests;
+// #[cfg(feature = "std")]
+use alt_serde_json::{Result as Result2, Value as Value2};
+use alt_serde::{Deserialize, Serialize};
 
-/// Configure the pallet by specifying the parameters and types on which it depends.
-pub trait Trait: frame_system::Trait {
-	/// Because this pallet emits events, it depends on the runtime's definition of an event.
-	type Event: From<Event<Self>> + Into<<Self as frame_system::Trait>::Event>;
+/// The pallet's configuration trait.
+pub trait Trait: system::Trait {
+    /// The overarching event type.
+    type Event: From<Event<Self>> + Into<<Self as system::Trait>::Event>;
 }
 
-// The pallet's runtime storage items.
-// https://substrate.dev/docs/en/knowledgebase/runtime/storage
+#[derive(Encode, Decode, PartialEq)]
+enum ConnectionCommand {
+    ConnectTo(OpaqueMultiaddr),
+    DisconnectFrom(OpaqueMultiaddr),
+}
+
+#[derive(Encode, Decode, PartialEq)]
+enum DataCommand {
+    AddBytes(Vec<u8>),
+    CatBytes(Vec<u8>),
+    InsertPin(Vec<u8>),
+    RemoveBlock(Vec<u8>),
+    RemovePin(Vec<u8>),
+}
+
+#[derive(Encode, Decode, PartialEq)]
+enum DhtCommand {
+    FindPeer(Vec<u8>),
+    GetProviders(Vec<u8>),
+}
+
+
+
+// This pallet's storage items.
 decl_storage! {
-	// A unique name is used to ensure that the pallet's storage items are isolated.
-	// This name may be updated, but each pallet in the runtime must use a unique name.
-	// ---------------------------------vvvvvvvvvvvvvv
-	trait Store for Module<T: Trait> as TemplateModule {
-		// Learn more about declaring storage items:
-		// https://substrate.dev/docs/en/knowledgebase/runtime/storage#declaring-storage-items
-		Something get(fn something): Option<u32>;
-	}
+    trait Store for Module<T: Trait> as TemplateModule {
+        // A list of addresses to connect to and disconnect from.
+        pub ConnectionQueue: Vec<ConnectionCommand>;
+        // A queue of data to publish or obtain on IPFS.
+        pub DataQueue: Vec<DataCommand>;
+        // A list of requests to the DHT.
+        pub DhtQueue: Vec<DhtCommand>;
+    }
 }
 
-// Pallets use events to inform users when important changes are made.
-// https://substrate.dev/docs/en/knowledgebase/runtime/events
+// The pallet's events
 decl_event!(
-	pub enum Event<T> where AccountId = <T as frame_system::Trait>::AccountId {
-		/// Event documentation should end with an array that provides descriptive names for event
-		/// parameters. [something, who]
-		SomethingStored(u32, AccountId),
-	}
+    pub enum Event<T> where AccountId = <T as system::Trait>::AccountId {
+        ConnectionRequested(AccountId),
+        DisconnectRequested(AccountId),
+        QueuedDataToAdd(AccountId),
+        QueuedDataToCat(AccountId),
+        QueuedDataToPin(AccountId),
+        QueuedDataToRemove(AccountId),
+        QueuedDataToUnpin(AccountId),
+        FindPeerIssued(AccountId),
+        FindProvidersIssued(AccountId),
+    }
 );
 
-// Errors inform users that something went wrong.
+// The pallet's errors
 decl_error! {
-	pub enum Error for Module<T: Trait> {
-		/// Error names should be descriptive.
-		NoneValue,
-		/// Errors should have helpful documentation associated with them.
-		StorageOverflow,
-	}
+    pub enum Error for Module<T: Trait> {
+        CantCreateRequest,
+        RequestTimeout,
+        RequestFailed,
+    }
 }
 
-// Dispatchable functions allows users to interact with the pallet and invoke state changes.
-// These functions materialize as "extrinsics", which are often compared to transactions.
-// Dispatchable functions must be annotated with a weight and must return a DispatchResult.
+
+// The pallet's dispatchable functions.
 decl_module! {
-	pub struct Module<T: Trait> for enum Call where origin: T::Origin {
-		// Errors must be initialized if they are used by the pallet.
-		type Error = Error<T>;
+    /// The module declaration.
+    pub struct Module<T: Trait> for enum Call where origin: T::Origin {
+        // Initializing errors
+        type Error = Error<T>;
 
-		// Events must be initialized if they are used by the pallet.
-		fn deposit_event() = default;
+        // Initializing events
+        fn deposit_event() = default;
 
-		/// An example dispatchable that takes a singles value as a parameter, writes the value to
-		/// storage and emits an event. This function must be dispatched by a signed extrinsic.
-		#[weight = 10_000 + T::DbWeight::get().writes(1)]
-		pub fn do_something(origin, something: u32) -> dispatch::DispatchResult {
-			// Check that the extrinsic was signed and get the signer.
-			// This function will return an error if the extrinsic is not signed.
-			// https://substrate.dev/docs/en/knowledgebase/runtime/origin
-			let who = ensure_signed(origin)?;
+        // needs to be synchronized with offchain_worker actitivies
+        fn on_initialize(block_number: T::BlockNumber) -> Weight {
+            ConnectionQueue::kill();
+            DhtQueue::kill();
 
-			// Update storage.
-			Something::put(something);
+            if block_number % 2.into() == 1.into() {
+                DataQueue::kill();
+            }
 
-			// Emit an event.
-			Self::deposit_event(RawEvent::SomethingStored(something, who));
-			// Return a successful DispatchResult
-			Ok(())
-		}
+            0
+        }
 
-		/// An example dispatchable that may throw a custom error.
-		#[weight = 10_000 + T::DbWeight::get().reads_writes(1,1)]
-		pub fn cause_error(origin) -> dispatch::DispatchResult {
-			let _who = ensure_signed(origin)?;
+        /// Mark a `Multiaddr` as a desired connection target. The connection will be established
+        /// during the next run of the off-chain `connection_housekeeping` process.
+        /*
+        // We remove the ability to connect from the explorer
+        #[weight = 100_000]
+        pub fn ipfs_connect(origin, addr: Vec<u8>) {
+            let who = ensure_signed(origin)?;
+            let cmd = ConnectionCommand::ConnectTo(OpaqueMultiaddr(addr));
 
-			// Read a value from storage.
-			match Something::get() {
-				// Return an error if the value has not been set.
-				None => Err(Error::<T>::NoneValue)?,
-				Some(old) => {
-					// Increment the value read from storage; will error in the event of overflow.
-					let new = old.checked_add(1).ok_or(Error::<T>::StorageOverflow)?;
-					// Update the value in storage with the incremented result.
-					Something::put(new);
-					Ok(())
-				},
-			}
-		}
-	}
+            ConnectionQueue::mutate(|cmds| if !cmds.contains(&cmd) { cmds.push(cmd) });
+            Self::deposit_event(RawEvent::ConnectionRequested(who));
+            
+        }
+        
+        /// Queues a `Multiaddr` to be disconnected. The connection will be severed during the next
+        /// run of the off-chain `connection_housekeeping` process.
+        #[weight = 500_000]
+        pub fn ipfs_disconnect(origin, addr: Vec<u8>) {
+            let who = ensure_signed(origin)?;
+            let cmd = ConnectionCommand::DisconnectFrom(OpaqueMultiaddr(addr));
+
+            ConnectionQueue::mutate(|cmds| if !cmds.contains(&cmd) { cmds.push(cmd) });
+            Self::deposit_event(RawEvent::DisconnectRequested(who));
+        }
+
+        /// Add arbitrary bytes to the IPFS repository. The registered `Cid` is printed out in the
+        /// logs.
+        #[weight = 200_000]
+        pub fn ipfs_add_bytes(origin, data: Vec<u8>) {
+            let who = ensure_signed(origin)?;
+
+            DataQueue::mutate(|queue| queue.push(DataCommand::AddBytes(data)));
+            Self::deposit_event(RawEvent::QueuedDataToAdd(who));
+        }
+        
+        /// Find IPFS data pointed to by the given `Cid`; if it is valid UTF-8, it is printed in the
+        /// logs verbatim; otherwise, the decimal representation of the bytes is displayed instead.
+        #[weight = 100_000]
+        pub fn ipfs_cat_bytes(origin, cid: Vec<u8>) {
+            let who = ensure_signed(origin)?;
+
+            DataQueue::mutate(|queue| queue.push(DataCommand::CatBytes(cid)));
+            Self::deposit_event(RawEvent::QueuedDataToCat(who));
+        }
+
+        /// Add arbitrary bytes to the IPFS repository. The registered `Cid` is printed out in the
+        /// logs.
+        #[weight = 300_000]
+        pub fn ipfs_remove_block(origin, cid: Vec<u8>) {
+            let who = ensure_signed(origin)?;
+
+            DataQueue::mutate(|queue| queue.push(DataCommand::RemoveBlock(cid)));
+            Self::deposit_event(RawEvent::QueuedDataToRemove(who));
+        }
+
+        /// Pins a given `Cid` non-recursively.
+        #[weight = 100_000]
+        pub fn ipfs_insert_pin(origin, cid: Vec<u8>) {
+            let who = ensure_signed(origin)?;
+
+            DataQueue::mutate(|queue| queue.push(DataCommand::InsertPin(cid)));
+            Self::deposit_event(RawEvent::QueuedDataToPin(who));
+        }
+
+        /// Unpins a given `Cid` non-recursively.
+        #[weight = 100_000]
+        pub fn ipfs_remove_pin(origin, cid: Vec<u8>) {
+            let who = ensure_signed(origin)?;
+
+            DataQueue::mutate(|queue| queue.push(DataCommand::RemovePin(cid)));
+            Self::deposit_event(RawEvent::QueuedDataToUnpin(who));
+        }
+        */
+        /// Find addresses associated with the given `PeerId`.
+        #[weight = 100_000]
+        pub fn ipfs_dht_find_peer(origin, peer_id: Vec<u8>) {
+            let who = ensure_signed(origin)?;
+
+            DhtQueue::mutate(|queue| queue.push(DhtCommand::FindPeer(peer_id)));
+            Self::deposit_event(RawEvent::FindPeerIssued(who));
+        }
+
+        /// Find the list of `PeerId`s known to be hosting the given `Cid`.
+        #[weight = 100_000]
+        pub fn ipfs_dht_find_providers(origin, cid: Vec<u8>) {
+            let who = ensure_signed(origin)?;
+
+            DhtQueue::mutate(|queue| queue.push(DhtCommand::GetProviders(cid)));
+            Self::deposit_event(RawEvent::FindProvidersIssued(who));
+        }
+
+        fn offchain_worker(block_number: T::BlockNumber) {
+            // process connect/disconnect commands
+            /// start test
+            // check each 100 blocks if the ipfs connection got the peer
+            if block_number % 100.into() == 0.into() {
+                let local_addr:  Vec<u8> = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWGSHVVoYwogv4udaYZ4BLbcfm7Rz49berteeH7pkVwFLW".as_bytes().to_vec();
+                let cmd = ConnectionCommand::ConnectTo(OpaqueMultiaddr(local_addr));
+                ConnectionQueue::mutate(|cmds| if !cmds.contains(&cmd) { cmds.push(cmd) });
+            }
+            /// end test
+            if let Err(e) = Self::connection_housekeeping() {
+                debug::error!("IPFS: Encountered an error during connection housekeeping: {:?}", e);
+            }
+
+            // process requests to the DHT
+            if let Err(e) = Self::handle_dht_requests() {
+                debug::error!("IPFS: Encountered an error while processing DHT requests: {:?}", e);
+            }
+
+            // process Ipfs::{add, get} queues every other block
+            if block_number % 2.into() == 1.into() {
+                if let Err(e) = Self::handle_data_requests() {
+                    debug::error!("IPFS: Encountered an error while processing data requests: {:?}", e);
+                }
+            }
+            
+            // display some stats every 5 blocks
+            if block_number % 5.into() == 0.into() {
+                if let Err(e) = Self::print_metadata() {
+                    debug::error!("IPFS: Encountered an error while obtaining metadata: {:?}", e);
+                }
+                match Self::fetch_data_ipfs2() {
+                    Ok(res) => debug::info!("{}", core::str::from_utf8(&res).unwrap()),
+                    Err(e) => debug::error!("Error fetch_data: {}", e),
+                    };
+            }
+        }
+    }
 }
+
+impl<T: Trait> Module<T> {
+    // send a request to the local IPFS node; can only be called be an off-chain worker
+    fn ipfs_request(req: IpfsRequest, deadline: impl Into<Option<Timestamp>>) -> Result<IpfsResponse, Error<T>> {
+        let ipfs_request = ipfs_offchain::PendingRequest::new(req).map_err(|_| Error::<T>::CantCreateRequest)?;
+        ipfs_request.try_wait(deadline)
+            .map_err(|_| Error::<T>::RequestTimeout)?
+            .map(|r| r.response)
+            .map_err(|e| {
+                if let ipfs_offchain::Error::IoError(err) = e {
+                    if str::from_utf8(&err).unwrap() != "Duplicate connection attempt" {
+                        debug::error!("IPFS: request failed: {}", str::from_utf8(&err).unwrap());
+                    } else {
+                        debug::info!("🔌 IPFS: Node correctly connected");
+                    }
+                    
+                } else {
+                    debug::error!("IPFS: request failed: {:?}", e);
+                }
+                Error::<T>::RequestFailed
+            })
+    }
+
+    fn connection_housekeeping() -> Result<(), Error<T>> {
+        let mut deadline;
+
+        for cmd in ConnectionQueue::get() {
+            deadline = Some(timestamp().add(Duration::from_millis(1_000)));
+
+            match cmd {
+                // connect to the desired peers if not yet connected
+                ConnectionCommand::ConnectTo(addr) => {
+                    match Self::ipfs_request(IpfsRequest::Connect(addr.clone()), deadline) {
+                        Ok(IpfsResponse::Success) => {
+                            debug::info!(
+                                "IPFS: connected to {}",
+                                str::from_utf8(&addr.0).expect("our own calls can be trusted to be UTF-8; qed")
+                            );
+                        }
+                        Ok(_) => unreachable!("only Success can be a response for that request type; qed"),
+                        Err(_e) => debug::info!("🛂 IPFS: connection check"),
+                       }
+                }
+                // disconnect from peers that are no longer desired
+                ConnectionCommand::DisconnectFrom(addr) => {
+                    match Self::ipfs_request(IpfsRequest::Disconnect(addr.clone()), deadline) {
+                        Ok(IpfsResponse::Success) => {
+                            debug::info!(
+                                "IPFS: disconnected from {}",
+                                str::from_utf8(&addr.0).expect("our own calls can be trusted to be UTF-8; qed")
+                            );
+                        }
+                        Ok(_) => unreachable!("only Success can be a response for that request type; qed"),
+                        Err(e) => debug::error!("IPFS: disconnect error: {:?}", e),
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn handle_dht_requests() -> Result<(), Error<T>> {
+        let mut deadline;
+
+        for cmd in DhtQueue::get() {
+            deadline = Some(timestamp().add(Duration::from_millis(1_000)));
+
+            match cmd {
+                // find the known addresses of the given peer
+                DhtCommand::FindPeer(peer_id) => {
+                    match Self::ipfs_request(IpfsRequest::FindPeer(peer_id.clone()), deadline) {
+                        Ok(IpfsResponse::FindPeer(addrs)) => {
+                            debug::info!(
+                                "IPFS: found the following addresses of {}: {:?}",
+                                str::from_utf8(&peer_id).expect("our own calls can be trusted to be UTF-8; qed"),
+                                addrs.iter()
+                                    .map(|addr| str::from_utf8(&addr.0)
+                                        .expect("our node's results can be trusted to be UTF-8; qed"))
+                                    .collect::<Vec<_>>()
+                            );
+                        }
+                        Ok(_) => unreachable!("only FindPeer can be a response for that request type; qed"),
+                        Err(e) => debug::error!("IPFS: find peer error: {:?}", e),
+                    }
+                }
+                // disconnect from peers that are no longer desired
+                DhtCommand::GetProviders(cid) => {
+                    match Self::ipfs_request(IpfsRequest::GetProviders(cid.clone()), deadline) {
+                        Ok(IpfsResponse::GetProviders(peer_ids)) => {
+                            debug::info!(
+                                "IPFS: found the following providers of {}: {:?}",
+                                str::from_utf8(&cid).expect("our own calls can be trusted to be UTF-8; qed"),
+                                peer_ids.iter()
+                                    .map(|peer_id| str::from_utf8(&peer_id)
+                                        .expect("our node's results can be trusted to be UTF-8; qed"))
+                                    .collect::<Vec<_>>()
+                            );
+                        }
+                        Ok(_) => unreachable!("only GetProviders can be a response for that request type; qed"),
+                        Err(e) => debug::error!("IPFS: find providers error: {:?}", e),
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn handle_data_requests() -> Result<(), Error<T>> {
+        let data_queue = DataQueue::get();
+        let len = data_queue.len();
+        if len != 0 {
+            debug::info!("IPFS: {} entr{} in the data queue", len, if len == 1 { "y" } else { "ies" });
+        }
+
+        let deadline = Some(timestamp().add(Duration::from_millis(1_000)));
+        for cmd in data_queue.into_iter() {
+            match cmd {
+                DataCommand::AddBytes(data) => {
+                    match Self::ipfs_request(IpfsRequest::AddBytes(data.clone()), deadline) {
+                        Ok(IpfsResponse::AddBytes(cid)) => {
+                            debug::info!(
+                                "IPFS: added data with Cid {}",
+                                str::from_utf8(&cid).expect("our own IPFS node can be trusted here; qed")
+                            );
+                        },
+                        Ok(_) => unreachable!("only AddBytes can be a response for that request type; qed"),
+                        Err(e) => debug::error!("IPFS: add error: {:?}", e),
+                    }
+                }
+                DataCommand::CatBytes(data) => {
+                    match Self::ipfs_request(IpfsRequest::CatBytes(data.clone()), deadline) {
+                        Ok(IpfsResponse::CatBytes(data)) => {
+                            if let Ok(str) = str::from_utf8(&data) {
+                                debug::info!("IPFS: got data: {:?}", str);
+                            } else {
+                                debug::info!("IPFS: got data: {:x?}", data);
+                            };
+                        },
+                        Ok(_) => unreachable!("only CatBytes can be a response for that request type; qed"),
+                        Err(e) => debug::error!("IPFS: error: {:?}", e),
+                    }
+                }
+                DataCommand::RemoveBlock(cid) => {
+                    match Self::ipfs_request(IpfsRequest::RemoveBlock(cid), deadline) {
+                        Ok(IpfsResponse::RemoveBlock(cid)) => {
+                            debug::info!(
+                                "IPFS: removed a block with Cid {}",
+                                str::from_utf8(&cid).expect("our own IPFS node can be trusted here; qed")
+                            );
+                        },
+                        Ok(_) => unreachable!("only RemoveBlock can be a response for that request type; qed"),
+                        Err(e) => debug::error!("IPFS: remove block error: {:?}", e),
+                    }
+                }
+                DataCommand::InsertPin(cid) => {
+                    match Self::ipfs_request(IpfsRequest::InsertPin(cid.clone(), false), deadline) {
+                        Ok(IpfsResponse::Success) => {
+                            debug::info!(
+                                "IPFS: pinned data with Cid {}",
+                                str::from_utf8(&cid).expect("our own request can be trusted to be UTF-8; qed")
+                            );
+                        },
+                        Ok(_) => unreachable!("only Success can be a response for that request type; qed"),
+                        Err(e) => debug::error!("IPFS: insert pin error: {:?}", e),
+                    }
+                }
+                DataCommand::RemovePin(cid) => {
+                    match Self::ipfs_request(IpfsRequest::RemovePin(cid.clone(), false), deadline) {
+                        Ok(IpfsResponse::Success) => {
+                            debug::info!(
+                                "IPFS: unpinned data with Cid {}",
+                                str::from_utf8(&cid).expect("our own request can be trusted to be UTF-8; qed")
+                            );
+                        },
+                        Ok(_) => unreachable!("only Success can be a response for that request type; qed"),
+                        Err(e) => debug::error!("IPFS: remove pin error: {:?}", e),
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn print_metadata() -> Result<(), Error<T>> {
+        let deadline = Some(timestamp().add(Duration::from_millis(200)));
+
+        let peers = if let IpfsResponse::Peers(peers) = Self::ipfs_request(IpfsRequest::Peers, deadline)? {
+            peers
+        } else {
+            unreachable!("only Peers can be a response for that request type; qed");
+        };
+        let peer_count = peers.len();
+        debug::info!(
+            "🌐 IPFS: {}",
+            if peer_count == 1 { "currently connected to the network" } else { "currently not connected to the network" },
+        );
+
+        Ok(())
+    }
+}
+
+
+  impl<T: Trait> Module<T> {
+    fn fetch_data_ipfs2() -> Result<Vec<u8>, &'static str> {
+  
+      // Specifying the request
+      let pending = http::Request::get("http://127.0.0.1:5001/api/v0/config/show").method(sp_runtime::offchain::http::Method::Other("POST"))
+        .send()
+        .map_err(|_| "Error in sending http GET request")?;
+  
+      // Waiting for the response
+      let response = pending.wait()
+        .map_err(|_| "Error in waiting http response back")?;
+  
+      // Check if the HTTP response is okay
+      if response.code != 200 {
+        debug::warn!("Unexpected status code: {}", response.code);
+        // return Err("Non-200 status code returned from http request");
+      }
+      ipfs_peer_id(core::str::from_utf8(&response.body().collect::<Vec<u8>>()).unwrap());
+      Ok(response.body().collect::<Vec<u8>>())
+    }
+  }
+
+
+
+
+// get the IPFS peerID of the runing node
+fn ipfs_peer_id(data: &str) -> Result2<()> {
+    // Parse the string of data into alt_serde_json::Value.
+    // let v: Value2 = alt_alt_serde_json::from_str(data)?;
+    
+    // Access parts of the data by indexing with square brackets.
+    // debug::info!("IPFS PEER: {}", v["Identity"]["PeerID"]);
+    let res = alt_serde_json::from_str(data);
+    
+    if res.is_ok() {
+        let v: Value2 = res.unwrap();
+        // debug::info!("IPFS PEER: /ip4/127.0.0.1/tcp/4001/{}", v["Identity"]["PeerID"].as_str().unwrap());
+        
+    }
+    
+    Ok(())
+}
+
+
+
+
