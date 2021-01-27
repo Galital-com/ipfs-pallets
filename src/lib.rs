@@ -8,11 +8,12 @@ use frame_system::{self as system, ensure_signed};
 use sp_core::offchain::{Duration, IpfsRequest, IpfsResponse, OpaqueMultiaddr, Timestamp};
 use sp_io::offchain::timestamp;
 use sp_runtime::offchain::{ipfs as ipfs_offchain, http};
+
+
 use sp_std::{str, vec::Vec};
 
 // #[cfg(feature = "std")]
 use alt_serde_json::{Result as Result2, Value as Value2};
-use alt_serde::{Deserialize, Serialize};
 
 /// The pallet's configuration trait.
 pub trait Trait: system::Trait {
@@ -102,79 +103,7 @@ decl_module! {
             0
         }
 
-        /// Mark a `Multiaddr` as a desired connection target. The connection will be established
-        /// during the next run of the off-chain `connection_housekeeping` process.
-        /*
-        // We remove the ability to connect from the explorer
-        #[weight = 100_000]
-        pub fn ipfs_connect(origin, addr: Vec<u8>) {
-            let who = ensure_signed(origin)?;
-            let cmd = ConnectionCommand::ConnectTo(OpaqueMultiaddr(addr));
-
-            ConnectionQueue::mutate(|cmds| if !cmds.contains(&cmd) { cmds.push(cmd) });
-            Self::deposit_event(RawEvent::ConnectionRequested(who));
-            
-        }
         
-        /// Queues a `Multiaddr` to be disconnected. The connection will be severed during the next
-        /// run of the off-chain `connection_housekeeping` process.
-        #[weight = 500_000]
-        pub fn ipfs_disconnect(origin, addr: Vec<u8>) {
-            let who = ensure_signed(origin)?;
-            let cmd = ConnectionCommand::DisconnectFrom(OpaqueMultiaddr(addr));
-
-            ConnectionQueue::mutate(|cmds| if !cmds.contains(&cmd) { cmds.push(cmd) });
-            Self::deposit_event(RawEvent::DisconnectRequested(who));
-        }
-
-        /// Add arbitrary bytes to the IPFS repository. The registered `Cid` is printed out in the
-        /// logs.
-        #[weight = 200_000]
-        pub fn ipfs_add_bytes(origin, data: Vec<u8>) {
-            let who = ensure_signed(origin)?;
-
-            DataQueue::mutate(|queue| queue.push(DataCommand::AddBytes(data)));
-            Self::deposit_event(RawEvent::QueuedDataToAdd(who));
-        }
-        
-        /// Find IPFS data pointed to by the given `Cid`; if it is valid UTF-8, it is printed in the
-        /// logs verbatim; otherwise, the decimal representation of the bytes is displayed instead.
-        #[weight = 100_000]
-        pub fn ipfs_cat_bytes(origin, cid: Vec<u8>) {
-            let who = ensure_signed(origin)?;
-
-            DataQueue::mutate(|queue| queue.push(DataCommand::CatBytes(cid)));
-            Self::deposit_event(RawEvent::QueuedDataToCat(who));
-        }
-
-        /// Add arbitrary bytes to the IPFS repository. The registered `Cid` is printed out in the
-        /// logs.
-        #[weight = 300_000]
-        pub fn ipfs_remove_block(origin, cid: Vec<u8>) {
-            let who = ensure_signed(origin)?;
-
-            DataQueue::mutate(|queue| queue.push(DataCommand::RemoveBlock(cid)));
-            Self::deposit_event(RawEvent::QueuedDataToRemove(who));
-        }
-
-        /// Pins a given `Cid` non-recursively.
-        #[weight = 100_000]
-        pub fn ipfs_insert_pin(origin, cid: Vec<u8>) {
-            let who = ensure_signed(origin)?;
-
-            DataQueue::mutate(|queue| queue.push(DataCommand::InsertPin(cid)));
-            Self::deposit_event(RawEvent::QueuedDataToPin(who));
-        }
-
-        /// Unpins a given `Cid` non-recursively.
-        #[weight = 100_000]
-        pub fn ipfs_remove_pin(origin, cid: Vec<u8>) {
-            let who = ensure_signed(origin)?;
-
-            DataQueue::mutate(|queue| queue.push(DataCommand::RemovePin(cid)));
-            Self::deposit_event(RawEvent::QueuedDataToUnpin(who));
-        }
-        */
         /// Find addresses associated with the given `PeerId`.
         #[weight = 100_000]
         pub fn ipfs_dht_find_peer(origin, peer_id: Vec<u8>) {
@@ -195,14 +124,20 @@ decl_module! {
 
         fn offchain_worker(block_number: T::BlockNumber) {
             // process connect/disconnect commands
-            /// start test
             // check each 100 blocks if the ipfs connection got the peer
             if block_number % 100.into() == 0.into() {
-                let local_addr:  Vec<u8> = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWGSHVVoYwogv4udaYZ4BLbcfm7Rz49berteeH7pkVwFLW".as_bytes().to_vec();
-                let cmd = ConnectionCommand::ConnectTo(OpaqueMultiaddr(local_addr));
-                ConnectionQueue::mutate(|cmds| if !cmds.contains(&cmd) { cmds.push(cmd) });
+                unsafe {
+                    match Self::connect_to_local_ipfs() {
+                        Ok(_res) => {
+                                    let cmd = ConnectionCommand::ConnectTo(OpaqueMultiaddr(LOCAL_ADDR.clone()));
+                                    ConnectionQueue::mutate(|cmds| if !cmds.contains(&cmd) { cmds.push(cmd) });
+                          },
+                        Err(e) => debug::error!("Error fetch_data: {}", e),
+                        };
+                    
+                
+            };
             }
-            /// end test
             if let Err(e) = Self::connection_housekeeping() {
                 debug::error!("IPFS: Encountered an error during connection housekeeping: {:?}", e);
             }
@@ -218,16 +153,18 @@ decl_module! {
                     debug::error!("IPFS: Encountered an error while processing data requests: {:?}", e);
                 }
             }
-            
             // display some stats every 5 blocks
             if block_number % 5.into() == 0.into() {
                 if let Err(e) = Self::print_metadata() {
                     debug::error!("IPFS: Encountered an error while obtaining metadata: {:?}", e);
                 }
-                match Self::fetch_data_ipfs2() {
-                    Ok(res) => debug::info!("{}", core::str::from_utf8(&res).unwrap()),
-                    Err(e) => debug::error!("Error fetch_data: {}", e),
+                // TODO rewrite and remove the unsafe mode
+                unsafe {
+                match Self::connect_to_local_ipfs() {
+                    Ok(_) => (),
+                    Err(_) => debug::error!("⚠️  IPFS: check if IPFS node is running correctly."),
                     };
+                };
             }
         }
     }
@@ -438,7 +375,7 @@ impl<T: Trait> Module<T> {
 
 
   impl<T: Trait> Module<T> {
-    fn fetch_data_ipfs2() -> Result<Vec<u8>, &'static str> {
+    unsafe fn connect_to_local_ipfs() -> Result<Vec<u8>, &'static str> {
   
       // Specifying the request
       let pending = http::Request::get("http://127.0.0.1:5001/api/v0/config/show").method(sp_runtime::offchain::http::Method::Other("POST"))
@@ -462,24 +399,31 @@ impl<T: Trait> Module<T> {
 
 
 
+#[macro_use]
+extern crate alloc;
+
+pub fn is_masternode () -> bool {
+    unsafe {
+        IS_MASTERNODE_OR_NOT
+    }
+}
+
+static mut  LOCAL_ADDR:  Vec<u8> = vec![] ;
 // get the IPFS peerID of the runing node
-fn ipfs_peer_id(data: &str) -> Result2<()> {
+static mut IS_MASTERNODE_OR_NOT: bool = false;
+unsafe fn ipfs_peer_id(data: &str) -> Result2<()> {
+    IS_MASTERNODE_OR_NOT = false ;
+    let ipfs_peer_id_local:  &str = "/ip4/127.0.0.1/tcp/4001/p2p/";
     // Parse the string of data into alt_serde_json::Value.
-    // let v: Value2 = alt_alt_serde_json::from_str(data)?;
-    
-    // Access parts of the data by indexing with square brackets.
-    // debug::info!("IPFS PEER: {}", v["Identity"]["PeerID"]);
     let res = alt_serde_json::from_str(data);
-    
     if res.is_ok() {
         let v: Value2 = res.unwrap();
-        // debug::info!("IPFS PEER: /ip4/127.0.0.1/tcp/4001/{}", v["Identity"]["PeerID"].as_str().unwrap());
-        
+        let u: &str = v["Identity"]["PeerID"].as_str().unwrap();
+        LOCAL_ADDR = [ipfs_peer_id_local.as_bytes().to_vec(), u.as_bytes().to_vec()].concat();
+        IS_MASTERNODE_OR_NOT = true;
     }
     
     Ok(())
 }
-
-
 
 
