@@ -13,7 +13,7 @@ use sp_runtime::offchain::{ipfs as ipfs_offchain, http};
 use sp_std::{str, vec::Vec};
 
 // #[cfg(feature = "std")]
-use alt_serde_json::{Result as Result2, Value as Value2};
+use alt_serde_json::{Value as Value2};
 
 /// The pallet's configuration trait.
 pub trait Trait: system::Trait {
@@ -103,7 +103,7 @@ decl_module! {
             0
         }
 
-        
+       
         /// Find addresses associated with the given `PeerId`.
         #[weight = 100_000]
         pub fn ipfs_dht_find_peer(origin, peer_id: Vec<u8>) {
@@ -124,8 +124,8 @@ decl_module! {
 
         fn offchain_worker(block_number: T::BlockNumber) {
             // process connect/disconnect commands
-            // check each 100 blocks if the ipfs connection got the peer
-            if block_number % 100.into() == 0.into() {
+            // check each 11 blocks if the ipfs connection got the peer
+            if block_number % 95.into() == 0.into() {
                 unsafe {
                     match Self::connect_to_local_ipfs() {
                         Ok(_res) => {
@@ -162,7 +162,10 @@ decl_module! {
                 unsafe {
                 match Self::connect_to_local_ipfs() {
                     Ok(_) => (),
-                    Err(_) => debug::error!("⚠️  IPFS: check if IPFS node is running correctly."),
+                    Err(_) => {
+                        debug::error!("⚠️  IPFS: check if IPFS node is running correctly.");
+                        IS_MASTERNODE_OR_NOT = false;            
+                        },
                     };
                 };
             }
@@ -388,7 +391,7 @@ impl<T: Trait> Module<T> {
   
       // Check if the HTTP response is okay
       if response.code != 200 {
-        debug::warn!("Unexpected status code: {}", response.code);
+        debug::warn!("IPFS: Something is wrong");
         // return Err("Non-200 status code returned from http request");
       }
       ipfs_peer_id(core::str::from_utf8(&response.body().collect::<Vec<u8>>()).unwrap());
@@ -411,7 +414,9 @@ pub fn is_masternode () -> bool {
 static mut  LOCAL_ADDR:  Vec<u8> = vec![] ;
 // get the IPFS peerID of the runing node
 static mut IS_MASTERNODE_OR_NOT: bool = false;
-unsafe fn ipfs_peer_id(data: &str) -> Result2<()> {
+
+// function that grab the node PeerID to pass it to the chain code
+unsafe fn ipfs_peer_id(data: &str){
     IS_MASTERNODE_OR_NOT = false ;
     let ipfs_peer_id_local:  &str = "/ip4/127.0.0.1/tcp/4001/p2p/";
     // Parse the string of data into alt_serde_json::Value.
@@ -423,7 +428,7 @@ unsafe fn ipfs_peer_id(data: &str) -> Result2<()> {
         IS_MASTERNODE_OR_NOT = true;
     }
     
-    Ok(())
+    
 }
 
 
